@@ -78,3 +78,6 @@ python main.py -q "如图，求圆心角" -i "path/to/user_image.png"
 2. **靶向词生成**：基于 Top-K 候选的题目、知识点提炼关键词/概念，供图像 RAG 使用
 3. **图像 RAG**：用 CLIP 对候选图像与用户图像、靶向词编码，融合相似度重排取 Top-3
 4. **答案聚合**：优先用 LLM 生成贴合用户场景的自然语言回答；否则返回检索结果模板
+
+
+python main.py -q "这道题怎么做" -i "test.png"
