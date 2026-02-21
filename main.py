@@ -8,6 +8,7 @@ import argparse
 from rag_agent import RAGAgent
 
 
+
 def main():
     parser = argparse.ArgumentParser(description="两阶段多模态 RAG")
     parser.add_argument("--question", "-q", type=str, default="", help="用户问题")
