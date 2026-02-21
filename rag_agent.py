@@ -24,9 +24,12 @@ from config import (
     TEXT_EMBEDDING_MODEL,
     CLIP_MODEL_NAME,
     CLIP_PRETRAINED,
+    REACT_MODE,
+    REACT_LOG_DIR,
 )
 from vector_store import NumpyVectorStore
 from answer_generator import generate_answer
+from react_logger import ReactLogger
 
 
 def get_image_full_path(image_path: str) -> str:
@@ -261,37 +264,77 @@ class RAGAgent:
         user_image_path: str | None = None,
         text_top_k: int = TEXT_TOP_K,
         image_top_k: int = IMAGE_TOP_K,
+        react_mode: bool | None = None,
     ) -> dict:
         """
-        完整两阶段 RAG 流程
+        完整两阶段 RAG 流程（ReAct 模式：分步思考日志输出到文件）
         返回: {
             "candidates_text": 文本粗筛结果,
             "targeted_keywords": 靶向词,
             "top_results": 图像精筛 Top-K,
-            "answer": 聚合回答
+            "answer": 聚合回答,
+            "react_log_path": ReAct 日志文件路径（若启用）
         }
         """
-        # 1. 文本 RAG 粗筛
-        candidates = self.text_rag_retrieve(user_question, top_k=text_top_k)
-
-        # 2. 靶向词生成
-        targeted_keywords = self.generate_targeted_keywords(candidates)
-
-        # 3. 图像 RAG 精筛（无用户图时仍可用靶向词重排）
         user_image_path = user_image_path or ""
+        use_react = react_mode if react_mode is not None else REACT_MODE
+        logger = ReactLogger(log_dir=REACT_LOG_DIR, enabled=use_react)
+        logger.start(user_question, user_image_path)
+
+        # Step 1: 文本 RAG 粗召回
+        candidates = self.text_rag_retrieve(user_question, top_k=text_top_k)
+        cand_summary = ", ".join([c.get("id", "") for c in candidates[:5]]) + (f" 等共 {len(candidates)} 条" if len(candidates) > 5 else "")
+        cand_topics = ", ".join([str(c.get("metadata", {}).get("knowledge_concept", ""))[:30] for c in candidates[:3]])
+        logger.step(
+            "1. 文本 RAG 粗召回",
+            thought="需要先在文本向量库中检索与用户问题语义相关的候选题目，缩小搜索范围。",
+            action="将用户问题向量化，在文本向量集合中做余弦相似度检索，召回 Top-K 候选。",
+            observation=f"召回 {len(candidates)} 条候选。ID: {cand_summary}。涉及知识点: {cand_topics}",
+        )
+
+        # Step 2: 靶向词生成
+        targeted_keywords = self.generate_targeted_keywords(candidates)
+        logger.step(
+            "2. 靶向词生成",
+            thought="基于文本召回的真实知识数据提炼靶向词，避免用户表述偏差导致的检索漂移。",
+            action="从候选集的题目、知识点中提取关键词、主题、概念，生成用于图像匹配的靶向词。",
+            observation=f"生成靶向词: {targeted_keywords}",
+        )
+
+        # Step 3: 图像 RAG 精筛 Top-3
         top_results = self.image_rag_refine(
             candidates, user_image_path, targeted_keywords, top_k=image_top_k
         )
+        top_summary = "; ".join([
+            f"({str(r.get('metadata', {}).get('question', ''))[:40]}... 答案:{r.get('metadata', {}).get('answer', '')})"
+            for r in top_results
+        ])
+        logger.step(
+            "3. 图像 RAG 精筛",
+            thought="用靶向词 + 用户图像对候选集做图像向量相似度计算，融合后重排取 Top-3。",
+            action="提取候选图像向量，计算用户图像相似度与靶向词-图像语义匹配度，加权融合后排序。",
+            observation=f"精筛得到 Top-3: {top_summary}",
+        )
 
-        # 4. 聚合回答（传入用户图片，供 LLM 视觉模型识别）
+        # Step 4: 聚合生成回答
         answer = self.aggregate_answer(user_question, top_results, targeted_keywords, user_image_path)
+        logger.step(
+            "4. 聚合生成回答",
+            thought="将 Top-3 检索结果作为上下文，结合用户问题与靶向词，组织生成可解释的最终回答。",
+            action="调用 LLM 或模板，生成贴合用户场景的结构化回答。",
+            observation=f"已生成回答，长度 {len(answer)} 字符。",
+        )
+        logger.final(answer)
 
-        return {
+        result = {
             "candidates_text": candidates,
             "targeted_keywords": targeted_keywords,
             "top_results": top_results,
             "answer": answer,
         }
+        if use_react and logger.log_path:
+            result["react_log_path"] = logger.log_path
+        return result
 
 
 if __name__ == "__main__":

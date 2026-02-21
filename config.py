@@ -30,3 +30,7 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://dashscope.aliyuncs.
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "qwen-turbo")  # 纯文本
 OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "qwen-vl-plus")  # 传图时用视觉模型
 OLLAMA_MODEL = "qwen2.5:7b"   # 本地 Ollama 模型
+
+# ReAct 模式（分步思考日志）
+REACT_MODE = True             # 是否启用 ReAct 模式，输出分步思考到文件
+REACT_LOG_DIR = os.path.join(BASE_DIR, "react_logs")  # 日志输出目录
