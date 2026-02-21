@@ -29,6 +29,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")  # 从环境变量读取�
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")  # 通义千问
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "qwen-turbo")  # 纯文本
 OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "qwen-vl-plus")  # 传图时用视觉模型
+OPENAI_MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "4096"))  # 回答最大 token，避免答案被截断
 OLLAMA_MODEL = "qwen2.5:7b"   # 本地 Ollama 模型
 
 # ReAct 模式（分步思考日志）

@@ -12,6 +12,7 @@ from config import (
     OPENAI_BASE_URL,
     OPENAI_MODEL,
     OPENAI_VISION_MODEL,
+    OPENAI_MAX_TOKENS,
     OLLAMA_MODEL,
     BASE_DIR,
     IMAGE_BASE_DIR,
@@ -96,7 +97,9 @@ def _call_openai(user_question: str, context: str, user_image_path: str = "") ->
 要求：
 1. 结合图像内容，概括题目涉及的知识点；
 2. 根据你从图中读取到的实际数据，给出解题思路或答案；
-3. 语言简洁、条理清晰，适合学生理解。
+3. 语言简洁、条理清晰，适合学生理解；
+4. 回答必须完整收尾：给出最终答案或结论，不要写到一半中断。
+5. **多种情况必须穷举**：若题目存在多种情况、多种分类或多种取法，必须逐一讨论并给出每种情况的结果，最后汇总所有答案，不要只算一种就结束。
 """
     image_url = _image_to_base64(user_image_path)
     if image_url:
@@ -115,7 +118,7 @@ def _call_openai(user_question: str, context: str, user_image_path: str = "") ->
             model=model,
             messages=[{"role": "user", "content": content}],
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=OPENAI_MAX_TOKENS,
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
