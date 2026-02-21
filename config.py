@@ -1,0 +1,32 @@
+"""配置参数"""
+import os
+
+# 路径配置
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH = os.path.join(BASE_DIR, "we_math_cleaned.csv")
+IMAGE_BASE_DIR = os.path.join(BASE_DIR, "extracted_images")  # 图像文件夹，与CSV中image_path拼接
+CHROMA_PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
+
+# ChromaDB 集合名
+TEXT_COLLECTION_NAME = "math_text_vectors"
+IMAGE_COLLECTION_NAME = "math_image_vectors"
+
+# 检索参数
+TEXT_TOP_K = 20          # 第一阶段文本 RAG 召回数量
+IMAGE_TOP_K = 3          # 第二阶段图像 RAG 精筛 Top-K
+IMAGE_SIM_WEIGHT = 0.7   # 图像相似度权重
+KEYWORD_SIM_WEIGHT = 0.3 # 靶向词-图像语义匹配度权重
+
+# 模型配置
+TEXT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 中英双语
+CLIP_MODEL_NAME = "ViT-B-32"
+CLIP_PRETRAINED = "openai"  # openai 预训练权重
+
+# LLM 回答生成（贴合用户场景，生成自然语言回答）
+USE_LLM_ANSWER = True   # 是否使用 LLM 生成回答，False 则仅返回检索结果
+LLM_PROVIDER = "openai"  # openai / ollama（通义千问用 openai，配合下方 base_url）
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")  # 从环境变量读取，勿写死
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")  # 通义千问
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "qwen-turbo")  # 纯文本
+OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "qwen-vl-plus")  # 传图时用视觉模型
+OLLAMA_MODEL = "qwen2.5:7b"   # 本地 Ollama 模型
