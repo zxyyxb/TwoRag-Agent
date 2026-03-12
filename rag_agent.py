@@ -90,12 +90,12 @@ class RAGAgent:
         return candidates
 
     # ---------- 中间环节：靶向词生成 ----------
-    def generate_targeted_keywords(self, candidates: list[dict], max_keywords: int = 10) -> list[str]:
+    def generate_targeted_keywords(self, candidates: list[dict], user_question: str, max_keywords: int = 10) -> list[str]:
         """
-        基于文本 RAG 候选数据，提炼靶向词（关键词/主题/概念）
-        用于辅助图像 RAG 做更精准的语义对齐
+        基于「用户问题 + 文本 RAG 候选数据」共同提炼靶向词（关键词/主题/概念），
+        用户问题在整体语义中权重更高，用于辅助图像 RAG 做更精准的语义对齐。
         """
-        # 聚合候选集中的题目、知识点、答案
+        # 1. 聚合候选集中的题目、知识点、答案
         all_texts = []
         for c in candidates[:min(15, len(candidates))]:
             md = c.get("metadata", {})
@@ -103,7 +103,15 @@ class RAGAgent:
             all_texts.append(doc or "")
             all_texts.append(md.get("knowledge_concept", ""))
             all_texts.append(md.get("question", ""))
-        combined = " ".join(filter(None, all_texts))
+
+        # 2. 将用户问题与候选文本拼接；通过重复用户问题提高其权重
+        uq = (user_question or "").strip()
+        combined_parts = []
+        if uq:
+            # 用户表述重复多次，相当于在规则匹配里提高其占比
+            combined_parts.extend([uq] * 3)
+        combined_parts.extend(filter(None, all_texts))
+        combined = " ".join(combined_parts)
 
         # 简单规则：提取英文术语、数学符号、几何图形相关词
         keywords = set()
@@ -131,7 +139,7 @@ class RAGAgent:
                 if len(words) >= 2:
                     keywords.add(" ".join(words[:2]))
 
-        # 3. 中文关键概念映射（常见几何）
+        # 3. 中文关键概念映射（常见几何），同样考虑用户问题中的中文描述
         cn_map = {
             "正方形": "square", "圆": "circle", "梯形": "trapezoid",
             "圆柱": "cylinder", "圆锥": "cone", "扇形": "sector",
@@ -256,23 +264,91 @@ class RAGAgent:
         parts.append("\n\n基于以上检索结果，建议结合题目图像与知识点进行解答。")
         return "".join(parts)
 
+    # ---------- 额外工具：为用户推荐相关练习题 ----------
+    def recommend_exercises(
+        self,
+        user_question: str,
+        user_image_path: str | None = None,
+        n_exercises: int = 5,
+        text_top_k: int = TEXT_TOP_K,
+        image_top_k: int = IMAGE_TOP_K,
+    ) -> list[dict]:
+        """
+        根据「用户当前的问题/薄弱知识点 + 题库」推荐若干道相似练习题。
+
+        设计思路：
+        - 仍然走“两阶段 RAG”链路：文本 RAG → 靶向词生成 → 图像 RAG 精筛；
+        - 但只返回题目本身的信息（题干 / 知识点 / 选项 / 答案 / 图片路径等），不调用 LLM 生成讲解；
+        - 供上层对话 Agent 在用户说「再来几道类似的题」「这块再出几道练习」时作为工具调用。
+
+        多轮对话建议：
+        - 上层对话管理逻辑可以记录最近一次 user_question；
+        - 当用户说「再来几道类似的题」时，直接用上一次的问题再次调用本方法即可；
+        - 也可以在用户只说「圆柱体积再出几道题」时，把这句话作为 user_question，单独调用本方法。
+        """
+        user_image_path = user_image_path or ""
+
+        # 文本 RAG 粗召回
+        candidates = self.text_rag_retrieve(user_question, top_k=text_top_k)
+        # 基于「用户问题 + 候选文本」生成靶向词（用户问题占比更大）
+        targeted_keywords = self.generate_targeted_keywords(candidates, user_question)
+        # 图像 RAG 精筛（如果有用户图像则会参与排序）
+        refined = self.image_rag_refine(
+            candidates,
+            user_image_path=user_image_path,
+            targeted_keywords=targeted_keywords,
+            top_k=image_top_k,
+        )
+
+        # 组装给上层使用的练习题结构，只保留核心信息，最多 n_exercises 道
+        exercises: list[dict] = []
+        for item in refined[: max(0, n_exercises)]:
+            md = item.get("metadata", {}) or {}
+            exercises.append(
+                {
+                    "id": item.get("id"),
+                    "question": md.get("question", ""),
+                    "knowledge_concept": md.get("knowledge_concept", ""),
+                    "option": md.get("option", ""),
+                    "answer": md.get("answer", ""),
+                    "image_path": md.get("image_path", ""),
+                    # 兼容可能存在的行号/原始 ID 字段，方便前端回溯原数据
+                    "source_row": md.get("row_id", md.get("id", "")),
+                    # 若 image_rag_refine 写入了图像打分，可作为相似度参考
+                    "image_rag_score": item.get("image_rag_score"),
+                }
+            )
+        return exercises
+
     # ---------- ReAct 工具：每个工具接收 state，返回 (state 更新, thought, action, observation) ----------
     def _tool_text_rag(self, state: dict, text_top_k: int, image_top_k: int) -> tuple[dict, str, str, str]:
         """工具：文本 RAG 粗检索"""
         candidates = self.text_rag_retrieve(state["user_question"], top_k=text_top_k)
         cand_summary = ", ".join([c.get("id", "") for c in candidates[:5]]) + (f" 等共 {len(candidates)} 条" if len(candidates) > 5 else "")
         cand_topics = ", ".join([str(c.get("metadata", {}).get("knowledge_concept", ""))[:30] for c in candidates[:3]])
+        # 为日志提供更清晰的题目级信息，便于事后复盘
+        top_questions = []
+        for i, c in enumerate(candidates[:3], start=1):
+            md = c.get("metadata", {})
+            q = (md.get("question") or "").strip()
+            if q:
+                top_questions.append(f"{i}. {q[:160]}{'...' if len(q) > 160 else ''}")
         thought = "需要先在文本向量库中检索与用户问题语义相关的候选题目，缩小搜索范围。"
         action = "text_rag_retrieve(question, top_k={})".format(text_top_k)
-        observation = "召回 {} 条候选。ID: {}。涉及知识点: {}".format(len(candidates), cand_summary, cand_topics)
+        observation = "召回 {} 条候选。ID: {}。涉及知识点: {}。Top-3 题目预览: {}".format(
+            len(candidates),
+            cand_summary,
+            cand_topics,
+            " | ".join(top_questions) if top_questions else "(无可展示题目文本)",
+        )
         return {"candidates": candidates}, thought, action, observation
 
     def _tool_generate_keywords(self, state: dict) -> tuple[dict, str, str, str]:
         """工具：从候选生成靶向词"""
         candidates = state.get("candidates", [])
-        targeted_keywords = self.generate_targeted_keywords(candidates)
-        thought = "基于文本召回的真实知识数据提炼靶向词，避免用户表述偏差导致的检索漂移。"
-        action = "generate_targeted_keywords(candidates)"
+        targeted_keywords = self.generate_targeted_keywords(candidates, state.get("user_question", ""))
+        thought = "综合用户问题与文本召回的真实知识数据提炼靶向词，其中用户问题占比更大，以兼顾用户意图与题库语义，避免检索漂移。"
+        action = "generate_targeted_keywords(candidates, user_question)"
         observation = "生成靶向词: {}".format(targeted_keywords)
         return {"targeted_keywords": targeted_keywords}, thought, action, observation
 
@@ -304,7 +380,10 @@ class RAGAgent:
         )
         thought = "将 Top 检索结果作为上下文，结合用户问题与靶向词，组织生成可解释的最终回答（或条件不足时直接返回无解）。"
         action = "aggregate_answer(question, top_results, targeted_keywords, user_image_path)"
-        observation = "已生成回答，长度 {} 字符。".format(len(answer))
+        # 在日志中记录部分答案内容，便于快速浏览 ReAct 过程中“针对题目给出的解答”
+        preview_len = 300
+        answer_preview = (answer or "")[:preview_len]
+        observation = "已生成回答，长度 {} 字符。回答前 {} 字符预览: {}".format(len(answer), preview_len, answer_preview)
         return {"answer": answer}, thought, action, observation
 
     def _get_react_tools(self):

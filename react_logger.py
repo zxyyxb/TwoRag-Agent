@@ -51,7 +51,8 @@ class ReactLogger:
         if not self.enabled:
             return
         self._write("--- Final Answer ---")
-        self._write(answer[:2000] + ("..." if len(answer) > 2000 else ""))
+        # 为了保证日志与终端输出一致，这里不再截断答案
+        self._write(answer)
         self._write("")
         self._write(f"{'='*60}\n")
 
