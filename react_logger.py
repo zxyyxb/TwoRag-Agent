@@ -1,6 +1,7 @@
 """
 ReAct 模式日志记录器
-输出格式：Thought -> Action -> Observation，体现两阶段多模态 RAG 的分步推理
+输出格式：Thought -> Action -> Observation，体现两阶段多模态 RAG 的分步推理。
+与 rag_agent 的工具化调用配合：每一步对应一次工具调用（如 text_rag_retrieve、image_rag_refine、aggregate_answer）。
 """
 import os
 from datetime import datetime

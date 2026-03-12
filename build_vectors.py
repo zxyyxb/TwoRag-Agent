@@ -37,10 +37,11 @@ def load_dataset(csv_path: str) -> pd.DataFrame:
 
 
 def build_text_for_embedding(row) -> str:
-    """构建用于文本向量化的文本：题目 + 知识点"""
+    """构建用于文本向量化的文本：题目 + 知识点 + 知识点描述"""
     question = str(row.get("question", "") or "")
     knowledge = str(row.get("knowledge concept", "") or "")
-    return f"{question}\n{knowledge}".strip()
+    desc = str(row.get("knowledge concept description", "") or "")[:2000]  # 描述可能很长，截断避免单条过长
+    return f"{question}\n{knowledge}\n{desc}".strip()
 
 
 def get_image_full_path(image_path: str) -> str:

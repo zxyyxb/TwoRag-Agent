@@ -89,10 +89,10 @@ def _call_openai(user_question: str, context: str, user_image_path: str = "") ->
 
 请先仔细观察用户上传的题目图像，再结合上述检索结果，贴合用户问题，用自然、友好的语言生成一份回答。
 
-**严格要求：**
-- 所有数值（直径、半径、高、长度等）必须只使用你在图中实际清晰读到的数据，不得编造或假设。
-- 若图中数值模糊无法辨认，请明确写出「无法从图中清晰读取具体数值」，并给出解题公式和步骤说明，不要虚构示例数据。
-- 若能从图中确认具体数值，请写出你看到的实际数值并据此计算。
+**严格要求（无论是否检索到参考题目，均须遵守）：**
+- 所有数值（直径、半径、高、长度等）必须只使用你在图中或题目中实际给出的数据，不得编造或假设。
+- 若图中或题目中数值模糊、未给出或缺少必要条件（如角度、某条边长、比例等），必须明确写出「无法从图中/题目中读取」或「根据当前条件无法唯一求解」，**不得假设或编造缺失数据再作答**。
+- 若能从图中或题目中确认具体数值，请写出你看到的实际数值并据此计算。
 
 要求：
 1. 结合图像内容，概括题目涉及的知识点；
@@ -140,11 +140,12 @@ def _call_ollama(user_question: str, context: str) -> str:
 【检索到的参考题目与知识点】
 {context}
 
-请基于上述检索结果，贴合用户问题，用自然、友好的语言生成一份回答。要求：
+请基于上述内容，贴合用户问题，用自然、友好的语言生成一份回答。要求：
 1. 先简要概括题目涉及的知识点；
-2. 结合检索到的相似题目，给出解题思路或答案提示；
+2. 若有参考题目可结合给出解题思路或答案提示；若无参考题目则仅根据用户题目与图像作答；
 3. 若可直接作答，给出答案并简要说明；
-4. 语言简洁、条理清晰，适合学生理解。
+4. **无论是否检索到参考题目，均不得编造题目或图中未给出的条件与数值**；若条件不足无法求解，必须明确写出「无法确定」或「需补充条件」；
+5. 语言简洁、条理清晰，适合学生理解。
 """
     try:
         r = requests.post(
@@ -161,13 +162,19 @@ def _call_ollama(user_question: str, context: str) -> str:
 
 def generate_answer(user_question: str, top_results: list, targeted_keywords: list, user_image_path: str = "") -> str:
     """
-    基于检索结果生成贴合用户场景的回答。
-    若 USE_LLM_ANSWER 为 False 或 LLM 不可用，返回空字符串，由调用方用模板兜底。
+    基于检索结果生成贴合用户场景的回答。无论是否检索到相关题目都会调用大模型，
+    通过提示词约束模型不编造条件；无检索结果时上下文会提示「仅根据用户题目与图像作答」。
     """
-    if not USE_LLM_ANSWER or not top_results:
+    if not USE_LLM_ANSWER:
         return ""
 
-    context = _build_context(top_results, targeted_keywords)
+    if top_results:
+        context = _build_context(top_results, targeted_keywords)
+    else:
+        context = (
+            "【注意】未检索到相关题目。请仅根据用户问题与题目图像作答，"
+            "切勿编造题目中未给出的条件或数值；若条件不足无法求解，请明确说明需补充的条件。"
+        )
 
     if LLM_PROVIDER == "ollama":
         return _call_ollama(user_question, context)

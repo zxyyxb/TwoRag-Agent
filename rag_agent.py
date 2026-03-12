@@ -222,22 +222,21 @@ class RAGAgent:
         user_image_path: str = "",
     ) -> str:
         """
-        基于 Top-3 结果聚合生成回答。
-        若配置了 LLM，则生成贴合用户场景的自然语言回答；否则返回检索结果模板。
+        基于 Top 结果聚合生成回答。无论是否检索到相关题目都会调用大模型生成答案，
+        通过提示词约束模型不编造条件。
         """
-        if not top_results:
-            return "未找到相关题目，请尝试换一种表述或上传更清晰的题目图像。"
-
-        # 优先使用 LLM 生成贴合用户场景的回答（传入用户图片供视觉模型识别）
+        # 始终调用 LLM 生成回答（无结果或匹配度低时由提示词约束模型不编造）
         llm_answer = generate_answer(user_question, top_results, targeted_keywords, user_image_path)
         if llm_answer:
-            ref_lines = ["\n\n---\n**参考题目**（检索到的相似题）:"]
-            for i, r in enumerate(top_results[:3], 1):
-                md = r.get("metadata", {})
-                q = md.get("question", "")[:80]
-                ans = md.get("answer", "")
-                ref_lines.append(f"  {i}. {q}... 答案: {ans}")
-            return llm_answer + "\n" + "\n".join(ref_lines)
+            if top_results:
+                ref_lines = ["\n\n---\n**参考题目**（检索到的相似题）:"]
+                for i, r in enumerate(top_results[:3], 1):
+                    md = r.get("metadata", {})
+                    q = md.get("question", "")[:80]
+                    ans = md.get("answer", "")
+                    ref_lines.append(f"  {i}. {q}... 答案: {ans}")
+                return llm_answer + "\n" + "\n".join(ref_lines)
+            return llm_answer
 
         # 无 LLM 时返回模板
         parts = ["## 检索到的相关题目与知识点\n"]
@@ -257,7 +256,67 @@ class RAGAgent:
         parts.append("\n\n基于以上检索结果，建议结合题目图像与知识点进行解答。")
         return "".join(parts)
 
-    # ---------- 主流程 ----------
+    # ---------- ReAct 工具：每个工具接收 state，返回 (state 更新, thought, action, observation) ----------
+    def _tool_text_rag(self, state: dict, text_top_k: int, image_top_k: int) -> tuple[dict, str, str, str]:
+        """工具：文本 RAG 粗检索"""
+        candidates = self.text_rag_retrieve(state["user_question"], top_k=text_top_k)
+        cand_summary = ", ".join([c.get("id", "") for c in candidates[:5]]) + (f" 等共 {len(candidates)} 条" if len(candidates) > 5 else "")
+        cand_topics = ", ".join([str(c.get("metadata", {}).get("knowledge_concept", ""))[:30] for c in candidates[:3]])
+        thought = "需要先在文本向量库中检索与用户问题语义相关的候选题目，缩小搜索范围。"
+        action = "text_rag_retrieve(question, top_k={})".format(text_top_k)
+        observation = "召回 {} 条候选。ID: {}。涉及知识点: {}".format(len(candidates), cand_summary, cand_topics)
+        return {"candidates": candidates}, thought, action, observation
+
+    def _tool_generate_keywords(self, state: dict) -> tuple[dict, str, str, str]:
+        """工具：从候选生成靶向词"""
+        candidates = state.get("candidates", [])
+        targeted_keywords = self.generate_targeted_keywords(candidates)
+        thought = "基于文本召回的真实知识数据提炼靶向词，避免用户表述偏差导致的检索漂移。"
+        action = "generate_targeted_keywords(candidates)"
+        observation = "生成靶向词: {}".format(targeted_keywords)
+        return {"targeted_keywords": targeted_keywords}, thought, action, observation
+
+    def _tool_image_rag(self, state: dict, image_top_k: int) -> tuple[dict, str, str, str]:
+        """工具：图像 RAG 精筛"""
+        candidates = state.get("candidates", [])
+        top_results = self.image_rag_refine(
+            candidates,
+            state.get("user_image_path", ""),
+            state.get("targeted_keywords", []),
+            top_k=image_top_k,
+        )
+        top_summary = "; ".join([
+            "({}... 答案:{})".format(str(r.get("metadata", {}).get("question", ""))[:40], r.get("metadata", {}).get("answer", ""))
+            for r in top_results
+        ])
+        thought = "用靶向词 + 用户图像对候选集做图像向量相似度计算，融合后重排取 Top-K。"
+        action = "image_rag_refine(candidates, user_image_path, targeted_keywords, top_k={})".format(image_top_k)
+        observation = "精筛得到 Top-{}: {}".format(len(top_results), top_summary)
+        return {"top_results": top_results}, thought, action, observation
+
+    def _tool_aggregate_answer(self, state: dict) -> tuple[dict, str, str, str]:
+        """工具：聚合生成最终回答"""
+        answer = self.aggregate_answer(
+            state["user_question"],
+            state.get("top_results", []),
+            state.get("targeted_keywords", []),
+            state.get("user_image_path", ""),
+        )
+        thought = "将 Top 检索结果作为上下文，结合用户问题与靶向词，组织生成可解释的最终回答（或条件不足时直接返回无解）。"
+        action = "aggregate_answer(question, top_results, targeted_keywords, user_image_path)"
+        observation = "已生成回答，长度 {} 字符。".format(len(answer))
+        return {"answer": answer}, thought, action, observation
+
+    def _get_react_tools(self):
+        """返回 ReAct 可调用的工具列表：(步骤显示名, 工具函数)。扩展时可在此增加工具（如计算器、请求用户补图）。"""
+        return [
+            ("1. 文本 RAG 粗召回", lambda s, tk, ik: self._tool_text_rag(s, tk, ik)),
+            ("2. 靶向词生成", lambda s, tk, ik: self._tool_generate_keywords(s)),
+            ("3. 图像 RAG 精筛", lambda s, tk, ik: self._tool_image_rag(s, ik)),
+            ("4. 聚合生成回答", lambda s, tk, ik: self._tool_aggregate_answer(s)),
+        ]
+
+    # ---------- 主流程：ReAct 工具链（固定顺序，每步 Thought -> Action -> Observation） ----------
     def run(
         self,
         user_question: str,
@@ -267,7 +326,7 @@ class RAGAgent:
         react_mode: bool | None = None,
     ) -> dict:
         """
-        完整两阶段 RAG 流程（ReAct 模式：分步思考日志输出到文件）
+        完整两阶段 RAG 流程（ReAct 工具化：文本 RAG、靶向词、图像 RAG、聚合回答 作为工具按序调用）
         返回: {
             "candidates_text": 文本粗筛结果,
             "targeted_keywords": 靶向词,
@@ -281,56 +340,28 @@ class RAGAgent:
         logger = ReactLogger(log_dir=REACT_LOG_DIR, enabled=use_react)
         logger.start(user_question, user_image_path)
 
-        # Step 1: 文本 RAG 粗召回
-        candidates = self.text_rag_retrieve(user_question, top_k=text_top_k)
-        cand_summary = ", ".join([c.get("id", "") for c in candidates[:5]]) + (f" 等共 {len(candidates)} 条" if len(candidates) > 5 else "")
-        cand_topics = ", ".join([str(c.get("metadata", {}).get("knowledge_concept", ""))[:30] for c in candidates[:3]])
-        logger.step(
-            "1. 文本 RAG 粗召回",
-            thought="需要先在文本向量库中检索与用户问题语义相关的候选题目，缩小搜索范围。",
-            action="将用户问题向量化，在文本向量集合中做余弦相似度检索，召回 Top-K 候选。",
-            observation=f"召回 {len(candidates)} 条候选。ID: {cand_summary}。涉及知识点: {cand_topics}",
-        )
+        state = {
+            "user_question": user_question,
+            "user_image_path": user_image_path,
+            "candidates": [],
+            "targeted_keywords": [],
+            "top_results": [],
+            "answer": "",
+        }
 
-        # Step 2: 靶向词生成
-        targeted_keywords = self.generate_targeted_keywords(candidates)
-        logger.step(
-            "2. 靶向词生成",
-            thought="基于文本召回的真实知识数据提炼靶向词，避免用户表述偏差导致的检索漂移。",
-            action="从候选集的题目、知识点中提取关键词、主题、概念，生成用于图像匹配的靶向词。",
-            observation=f"生成靶向词: {targeted_keywords}",
-        )
+        tools = self._get_react_tools()
+        for step_name, tool_fn in tools:
+            updates, thought, action, observation = tool_fn(state, text_top_k, image_top_k)
+            state.update(updates)
+            logger.step(step_name, thought, action, observation)
 
-        # Step 3: 图像 RAG 精筛 Top-3
-        top_results = self.image_rag_refine(
-            candidates, user_image_path, targeted_keywords, top_k=image_top_k
-        )
-        top_summary = "; ".join([
-            f"({str(r.get('metadata', {}).get('question', ''))[:40]}... 答案:{r.get('metadata', {}).get('answer', '')})"
-            for r in top_results
-        ])
-        logger.step(
-            "3. 图像 RAG 精筛",
-            thought="用靶向词 + 用户图像对候选集做图像向量相似度计算，融合后重排取 Top-3。",
-            action="提取候选图像向量，计算用户图像相似度与靶向词-图像语义匹配度，加权融合后排序。",
-            observation=f"精筛得到 Top-3: {top_summary}",
-        )
-
-        # Step 4: 聚合生成回答
-        answer = self.aggregate_answer(user_question, top_results, targeted_keywords, user_image_path)
-        logger.step(
-            "4. 聚合生成回答",
-            thought="将 Top-3 检索结果作为上下文，结合用户问题与靶向词，组织生成可解释的最终回答。",
-            action="调用 LLM 或模板，生成贴合用户场景的结构化回答。",
-            observation=f"已生成回答，长度 {len(answer)} 字符。",
-        )
-        logger.final(answer)
+        logger.final(state["answer"])
 
         result = {
-            "candidates_text": candidates,
-            "targeted_keywords": targeted_keywords,
-            "top_results": top_results,
-            "answer": answer,
+            "candidates_text": state["candidates"],
+            "targeted_keywords": state["targeted_keywords"],
+            "top_results": state["top_results"],
+            "answer": state["answer"],
         }
         if use_react and logger.log_path:
             result["react_log_path"] = logger.log_path
