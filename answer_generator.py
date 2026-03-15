@@ -187,3 +187,118 @@ def generate_answer(user_question: str, top_results: list, targeted_keywords: li
             print("[提示] LLM 返回空内容，请检查模型名或 API 配置。")
         return result
     return ""
+
+
+# ---------- ReAct 智能体：由 LLM 选择下一步工具或直接回复 ----------
+REACT_ACTIONS = ("direct_reply", "text_rag_retrieve", "generate_targeted_keywords", "image_rag_refine", "aggregate_answer")
+
+
+def _call_llm_simple_system_user(system: str, user: str, max_tokens: int = 512) -> str:
+    """仅文本的 LLM 调用，用于 ReAct 决策、直接回复等，不传图。"""
+    if LLM_PROVIDER != "openai" or not OPENAI_API_KEY:
+        return ""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_tokens=max_tokens,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[ReAct LLM 调用失败] {e}")
+        return ""
+
+
+def react_agent_decide(
+    user_question: str,
+    has_image: bool,
+    has_candidates: bool,
+    has_keywords: bool,
+    has_top_results: bool,
+    has_answer: bool,
+    history: list[tuple[str, str, str]],
+) -> tuple[str, str]:
+    """
+    由 LLM 决定下一步：直接回复用户，或选择要调用的工具名。
+    返回 (thought, action)，action 为 REACT_ACTIONS 之一。
+    """
+    state_desc = (
+        f"- 用户问题: {user_question[:200]}{'...' if len(user_question or '') > 200 else ''}\n"
+        f"- 用户是否上传了图片: {'是' if has_image else '否'}\n"
+        f"- 是否已执行文本 RAG 召回（有候选题目）: {'是' if has_candidates else '否'}\n"
+        f"- 是否已生成靶向词: {'是' if has_keywords else '否'}\n"
+        f"- 是否已执行图像 RAG 精筛（有 top_results）: {'是' if has_top_results else '否'}\n"
+        f"- 是否已生成最终回答: {'是' if has_answer else '否'}"
+    )
+    history_text = "\n".join(
+        [f"  Step: Thought: {t}; Action: {a}; Observation: {o[:120]}..." if len(o or "") > 120 else f"  Step: Thought: {t}; Action: {a}; Observation: {o}"
+         for t, a, o in history]
+    ) if history else "  （尚无步骤）"
+
+    system = """你是数学题目辅导助手背后的 ReAct 智能体。根据当前状态，你必须选择下一步：要么直接回复用户，要么调用一个工具。
+
+**重要规则（必须遵守）：**
+- 当用户上传了图片或提出了题目/知识点相关的问题（如「这题怎么做」「求…」「解…」）时，必须按顺序走完双 RAG 流程：先 text_rag_retrieve → 再 generate_targeted_keywords → 再 image_rag_refine → 最后 aggregate_answer。不得在尚未得到 top_results 时选择 aggregate_answer。
+- 只有在用户纯打招呼、寒暄、感谢、告别且无图片时，才选 direct_reply。
+
+可选动作（只能选一个）：
+- direct_reply: 仅当用户只是在打招呼、寒暄、感谢、告别，且没有上传图片、也没有提出具体题目/数学问题时使用。
+- text_rag_retrieve: 用户有题目相关表述或上传了图片，且「尚未做过文本召回」时，必须选此项作为第一步。
+- generate_targeted_keywords: 已有文本召回候选且尚未生成靶向词时选此项。
+- image_rag_refine: 已有靶向词且尚未做图像精筛时选此项（用户有图时尤其需要）。
+- aggregate_answer: 仅当「已有 top_results」时可选，用于生成最终讲解并结束。
+
+你必须严格按以下两行输出，不要多余内容：
+Thought: （一句话说明为什么选这个动作）
+Action: <动作名，仅输出一个英文动作名，不要重复写 Action:>"""
+
+    user = f"""【当前状态】
+{state_desc}
+
+【已有步骤】
+{history_text}
+
+请输出 Thought 和 Action（Action 只能是上述五个动作名之一）。"""
+
+    raw = _call_llm_simple_system_user(system, user, max_tokens=256)
+    thought = ""
+    action = ""
+    raw_lower = (raw or "").lower()
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.lower().startswith("thought:"):
+            # 同一行可能含 "; Action: xxx"，只保留 Thought 部分
+            thought = line[8:].strip()
+            if "; action:" in thought.lower():
+                thought = thought.split(";")[0].split("action:")[0].strip().rstrip(";")
+        if line.lower().startswith("action:"):
+            rest = line[6:].strip().lower()
+            for token in rest.replace(",", " ").split():
+                if token in REACT_ACTIONS:
+                    action = token
+                    break
+            if action:
+                break
+    # 若按行未解析到 Action，在整段中查找 "Action: xxx"（LLM 常与 Thought 写同一行）
+    if not action and "action:" in raw_lower:
+        idx = raw_lower.rfind("action:")
+        after = (raw[idx + 7:] or "").strip().lower()
+        for token in after.replace(",", " ").replace(";", " ").split():
+            if token in REACT_ACTIONS:
+                action = token
+                break
+    return thought or "选择下一步动作。", action
+
+
+def generate_direct_reply(user_question: str) -> str:
+    """当智能体选择 direct_reply 时，由 LLM 生成一句简短友好回复（不检索题库）。"""
+    system = "你是数学/几何题目辅导助手。用户发送的内容被判定为无需检索题库（例如打招呼、寒暄、感谢或告别）。请用 1～3 句话回复，简短、友好。若是打招呼，可介绍自己是题目辅导助手并邀请用户发题目或图片；若是感谢就说不用谢；若是告别就说再见。不要输出多余解释，只输出给用户看的那段回复。"
+    user = f"用户说: {user_question or '(无)'}"
+    out = _call_llm_simple_system_user(system, user, max_tokens=256)
+    return out if out else "你好！我是数学/几何题目辅导助手。你可以直接发一道题目的文字或图片，我会帮你检索相似题并讲解。"

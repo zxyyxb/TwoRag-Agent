@@ -1,6 +1,6 @@
 """
 两阶段多模态 RAG Agent
-流程：文本 RAG 粗筛 → 靶向词生成 → 图像 RAG 精筛 → 聚合回答
+由 LLM 智能体自主选择：直接回复（如问候）或调用工具链（文本 RAG → 靶向词 → 图像 RAG → 聚合回答）。
 """
 import os
 
@@ -28,7 +28,7 @@ from config import (
     REACT_LOG_DIR,
 )
 from vector_store import NumpyVectorStore
-from answer_generator import generate_answer
+from answer_generator import generate_answer, react_agent_decide, generate_direct_reply
 from react_logger import ReactLogger
 
 
@@ -39,6 +39,19 @@ def get_image_full_path(image_path: str) -> str:
         return image_path
     base = os.path.basename(image_path)
     return os.path.join(IMAGE_BASE_DIR, base)
+
+
+def _need_full_rag(user_question: str, has_image: bool) -> bool:
+    """用户上传了图片或问题表述像在问题目时，需要走完整双 RAG，不能直接聚合。"""
+    if has_image:
+        return True
+    q = (user_question or "").strip()
+    if not q:
+        return False
+    if len(q) > 15:
+        return True
+    question_marks = ("题", "求", "解", "怎么", "多少", "什么", "如何", "？", "?")
+    return any(m in q for m in question_marks)
 
 
 class RAGAgent:
@@ -387,15 +400,15 @@ class RAGAgent:
         return {"answer": answer}, thought, action, observation
 
     def _get_react_tools(self):
-        """返回 ReAct 可调用的工具列表：(步骤显示名, 工具函数)。扩展时可在此增加工具（如计算器、请求用户补图）。"""
-        return [
-            ("1. 文本 RAG 粗召回", lambda s, tk, ik: self._tool_text_rag(s, tk, ik)),
-            ("2. 靶向词生成", lambda s, tk, ik: self._tool_generate_keywords(s)),
-            ("3. 图像 RAG 精筛", lambda s, tk, ik: self._tool_image_rag(s, ik)),
-            ("4. 聚合生成回答", lambda s, tk, ik: self._tool_aggregate_answer(s)),
-        ]
+        """返回 动作名 -> (步骤显示名, 工具函数)，供智能体按 LLM 选择的 action 调用。"""
+        return {
+            "text_rag_retrieve": ("1. 文本 RAG 粗召回", lambda s, tk, ik: self._tool_text_rag(s, tk, ik)),
+            "generate_targeted_keywords": ("2. 靶向词生成", lambda s, tk, ik: self._tool_generate_keywords(s)),
+            "image_rag_refine": ("3. 图像 RAG 精筛", lambda s, tk, ik: self._tool_image_rag(s, ik)),
+            "aggregate_answer": ("4. 聚合生成回答", lambda s, tk, ik: self._tool_aggregate_answer(s)),
+        }
 
-    # ---------- 主流程：ReAct 工具链（固定顺序，每步 Thought -> Action -> Observation） ----------
+    # ---------- 主流程：由 LLM 智能体选择工具或直接回复（ReAct） ----------
     def run(
         self,
         user_question: str,
@@ -405,12 +418,13 @@ class RAGAgent:
         react_mode: bool | None = None,
     ) -> dict:
         """
-        完整两阶段 RAG 流程（ReAct 工具化：文本 RAG、靶向词、图像 RAG、聚合回答 作为工具按序调用）
+        由 LLM 智能体决定每一步：选择「直接回复」或调用某一工具（文本 RAG、靶向词、图像 RAG、聚合回答）。
+        例如用户只说「你好」时，智能体会选择 direct_reply 并结束；有具体题目时会选择 RAG 工具链。
         返回: {
             "candidates_text": 文本粗筛结果,
             "targeted_keywords": 靶向词,
             "top_results": 图像精筛 Top-K,
-            "answer": 聚合回答,
+            "answer": 最终回答,
             "react_log_path": ReAct 日志文件路径（若启用）
         }
         """
@@ -420,19 +434,78 @@ class RAGAgent:
         logger.start(user_question, user_image_path)
 
         state = {
-            "user_question": user_question,
+            "user_question": user_question or "",
             "user_image_path": user_image_path,
             "candidates": [],
             "targeted_keywords": [],
             "top_results": [],
             "answer": "",
         }
-
         tools = self._get_react_tools()
-        for step_name, tool_fn in tools:
-            updates, thought, action, observation = tool_fn(state, text_top_k, image_top_k)
+        history: list[tuple[str, str, str]] = []
+        max_steps = 10
+
+        for _ in range(max_steps):
+            has_candidates = len(state.get("candidates", [])) > 0
+            has_keywords = len(state.get("targeted_keywords", [])) > 0
+            has_top_results = len(state.get("top_results", [])) > 0
+            has_answer = bool(state.get("answer", "").strip())
+            has_image = bool(state.get("user_image_path", "").strip())
+            need_full_rag = _need_full_rag(state.get("user_question", ""), has_image)
+
+            thought, action = react_agent_decide(
+                user_question=state["user_question"],
+                has_image=has_image,
+                has_candidates=has_candidates,
+                has_keywords=has_keywords,
+                has_top_results=has_top_results,
+                has_answer=has_answer,
+                history=history,
+            )
+            # 状态校验：有图或题目相关表述时必须走完双 RAG，不得选 direct_reply 或提前 aggregate_answer
+            if need_full_rag and not has_top_results:
+                if action == "direct_reply" or action == "aggregate_answer" or (action == "image_rag_refine" and not has_keywords) or (action == "generate_targeted_keywords" and not has_candidates):
+                    if not has_candidates:
+                        action = "text_rag_retrieve"
+                        thought = thought or "用户有图或题目相关表述，需先执行文本 RAG 召回。"
+                    elif not has_keywords:
+                        action = "generate_targeted_keywords"
+                        thought = thought or "已有文本候选，需先生成靶向词。"
+                    else:
+                        action = "image_rag_refine"
+                        thought = thought or "已有靶向词，需执行图像 RAG 精筛。"
+            elif not action or action not in ("direct_reply", "text_rag_retrieve", "generate_targeted_keywords", "image_rag_refine", "aggregate_answer"):
+                # 解析失败时按当前状态推断下一步，避免误选 direct_reply 导致流程中断、最终答案为空
+                if need_full_rag:
+                    if not has_candidates:
+                        action = "text_rag_retrieve"
+                    elif not has_keywords:
+                        action = "generate_targeted_keywords"
+                    elif not has_top_results:
+                        action = "image_rag_refine"
+                    else:
+                        action = "aggregate_answer"
+                else:
+                    action = "direct_reply"
+                thought = thought or "根据当前状态选择下一步。"
+
+            logger.step("智能体决策", thought, "Action: " + action, "")
+
+            if action == "direct_reply":
+                answer = generate_direct_reply(state["user_question"])
+                state["answer"] = answer
+                logger.step("直接回复", "用户无需检索，由 LLM 生成简短回复。", "direct_reply(user_question)", "已生成回复，长度 {} 字符。".format(len(answer)))
+                break
+
+            if action not in tools:
+                break
+            step_name, tool_fn = tools[action]
+            updates, t, a, obs = tool_fn(state, text_top_k, image_top_k)
             state.update(updates)
-            logger.step(step_name, thought, action, observation)
+            history.append((t, a, obs))
+            logger.step(step_name, t, a, obs)
+            if action == "aggregate_answer":
+                break
 
         logger.final(state["answer"])
 
