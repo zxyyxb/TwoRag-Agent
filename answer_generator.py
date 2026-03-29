@@ -15,8 +15,16 @@ from config import (
     OPENAI_MAX_TOKENS,
     OLLAMA_MODEL,
     BASE_DIR,
-    IMAGE_BASE_DIR,
+    resolve_dataset_image_path,
 )
+
+
+def _tutor_title() -> str:
+    return "数学与理科综合题目辅导助手"
+
+
+def _tutor_topic_hint() -> str:
+    return "题目（数学或科学）"
 
 
 def _build_context(top_results: list, targeted_keywords: list) -> str:
@@ -35,22 +43,20 @@ def _build_context(top_results: list, targeted_keywords: list) -> str:
 
 
 def _resolve_image_path(image_path: str) -> str | None:
-    """解析图片实际路径，支持多种写法"""
+    """解析图片实际路径：合并题库双目录 + 本机绝对/相对路径"""
     if not image_path or not image_path.strip():
         return None
     image_path = image_path.strip()
-    candidates = []
-    if os.path.isabs(image_path):
-        candidates.append(image_path)
-    else:
-        base_name = os.path.basename(image_path)
-        candidates.append(os.path.join(IMAGE_BASE_DIR, base_name))
-        candidates.append(os.path.join(BASE_DIR, image_path))
-        candidates.append(os.path.join(BASE_DIR, base_name))
-        candidates.append(image_path)  # 相对当前工作目录
-    for p in candidates:
-        if p and os.path.exists(p):
-            return os.path.abspath(p)
+    if os.path.isabs(image_path) and os.path.isfile(image_path):
+        return os.path.abspath(image_path)
+    r = resolve_dataset_image_path(image_path)
+    if r and os.path.isfile(r):
+        return os.path.abspath(r)
+    rel = os.path.normpath(os.path.join(BASE_DIR, image_path.replace("\\", "/")))
+    if os.path.isfile(rel):
+        return os.path.abspath(rel)
+    if os.path.isfile(image_path):
+        return os.path.abspath(image_path)
     return None
 
 
@@ -79,7 +85,8 @@ def _call_openai(user_question: str, context: str, user_image_path: str = "") ->
         return ""
 
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
-    prompt = f"""你是一个数学题目辅导助手。用户提问并附带了题目图像，你已经检索到以下相似题目与知识点作为参考。
+    tutor = _tutor_title()
+    prompt = f"""你是一个{tutor}。用户提问并附带了题目图像，你已经检索到以下相似题目与知识点作为参考。
 
 【用户问题】
 {user_question}
@@ -132,7 +139,8 @@ def _call_ollama(user_question: str, context: str) -> str:
     except ImportError:
         return ""
 
-    prompt = f"""你是一个数学题目辅导助手。用户提问并附带了相关题目图像，你已经检索到以下相似题目与知识点作为参考。
+    tutor = _tutor_title()
+    prompt = f"""你是一个{tutor}。用户提问并附带了相关题目图像，你已经检索到以下相似题目与知识点作为参考。
 
 【用户问题】
 {user_question}
@@ -241,14 +249,16 @@ def react_agent_decide(
          for t, a, o in history]
     ) if history else "  （尚无步骤）"
 
-    system = """你是数学题目辅导助手背后的 ReAct 智能体。根据当前状态，你必须选择下一步：要么直接回复用户，要么调用一个工具。
+    tutor = _tutor_title()
+    topic = _tutor_topic_hint()
+    system = f"""你是{tutor}背后的 ReAct 智能体。根据当前状态，你必须选择下一步：要么直接回复用户，要么调用一个工具。
 
 **重要规则（必须遵守）：**
-- 当用户上传了图片或提出了题目/知识点相关的问题（如「这题怎么做」「求…」「解…」）时，必须按顺序走完双 RAG 流程：先 text_rag_retrieve → 再 generate_targeted_keywords → 再 image_rag_refine → 最后 aggregate_answer。不得在尚未得到 top_results 时选择 aggregate_answer。
+- 当用户上传了图片或提出了题目/知识点相关的问题（如「这题怎么做」「求…」「解…」「选哪个」）时，必须按顺序走完双 RAG 流程：先 text_rag_retrieve → 再 generate_targeted_keywords → 再 image_rag_refine → 最后 aggregate_answer。不得在尚未得到 top_results 时选择 aggregate_answer。
 - 只有在用户纯打招呼、寒暄、感谢、告别且无图片时，才选 direct_reply。
 
 可选动作（只能选一个）：
-- direct_reply: 仅当用户只是在打招呼、寒暄、感谢、告别，且没有上传图片、也没有提出具体题目/数学问题时使用。
+- direct_reply: 仅当用户只是在打招呼、寒暄、感谢、告别，且没有上传图片、也没有提出具体{topic}时使用。
 - text_rag_retrieve: 用户有题目相关表述或上传了图片，且「尚未做过文本召回」时，必须选此项作为第一步。
 - generate_targeted_keywords: 已有文本召回候选且尚未生成靶向词时选此项。
 - image_rag_refine: 已有靶向词且尚未做图像精筛时选此项（用户有图时尤其需要）。
@@ -298,7 +308,15 @@ Action: <动作名，仅输出一个英文动作名，不要重复写 Action:>""
 
 def generate_direct_reply(user_question: str) -> str:
     """当智能体选择 direct_reply 时，由 LLM 生成一句简短友好回复（不检索题库）。"""
-    system = "你是数学/几何题目辅导助手。用户发送的内容被判定为无需检索题库（例如打招呼、寒暄、感谢或告别）。请用 1～3 句话回复，简短、友好。若是打招呼，可介绍自己是题目辅导助手并邀请用户发题目或图片；若是感谢就说不用谢；若是告别就说再见。不要输出多余解释，只输出给用户看的那段回复。"
+    tutor = _tutor_title()
+    system = (
+        f"你是{tutor}。用户发送的内容被判定为无需检索题库（例如打招呼、寒暄、感谢或告别）。"
+        "请用 1～3 句话回复，简短、友好。若是打招呼，可介绍自己是题目辅导助手并邀请用户发题目或图片；"
+        "若是感谢就说不用谢；若是告别就说再见。不要输出多余解释，只输出给用户看的那段回复。"
+    )
     user = f"用户说: {user_question or '(无)'}"
     out = _call_llm_simple_system_user(system, user, max_tokens=256)
-    return out if out else "你好！我是数学/几何题目辅导助手。你可以直接发一道题目的文字或图片，我会帮你检索相似题并讲解。"
+    fallback = (
+        f"你好！我是{tutor}。你可以直接发一道题目的文字或图片，我会帮你检索相似题并讲解。"
+    )
+    return out if out else fallback

@@ -17,11 +17,11 @@ from tqdm import tqdm
 
 from config import (
     CSV_PATH,
-    IMAGE_BASE_DIR,
     CHROMA_PERSIST_DIR,
     TEXT_EMBEDDING_MODEL,
     CLIP_MODEL_NAME,
     CLIP_PRETRAINED,
+    resolve_dataset_image_path,
 )
 from vector_store import NumpyVectorStore
 
@@ -45,17 +45,17 @@ def build_text_for_embedding(row) -> str:
 
 
 def get_image_full_path(image_path: str) -> str:
-    """根据 CSV 中的 image_path 获取实际图像完整路径"""
-    # image_path 可能是 extracted_images/1-1.png
-    if os.path.isabs(image_path):
-        return image_path
-    return os.path.join(IMAGE_BASE_DIR, os.path.basename(image_path))
+    """根据 CSV 中的 image_path 获取实际图像完整路径（WeMath / ScienceQA 双目录）"""
+    return resolve_dataset_image_path(str(image_path or ""))
 
 
 def main():
     print("=" * 50)
     print("离线数据构建：文本向量 + 图像向量")
     print("=" * 50)
+    print(f"合并题库 CSV: {CSV_PATH}")
+    print("图像目录: extracted_images + scienceqa_images_fixed（见 CSV 中 image_path）")
+    print(f"向量持久化: {CHROMA_PERSIST_DIR}")
 
     # 1. 加载数据
     if not os.path.exists(CSV_PATH):
@@ -127,14 +127,9 @@ def main():
         img_path = row.get("image_path", "")
         full_path = get_image_full_path(img_path)
 
-        if not os.path.exists(full_path):
-            # 尝试直接用 image_path
-            alt = os.path.join(IMAGE_BASE_DIR, img_path) if img_path else ""
-            if os.path.exists(alt):
-                full_path = alt
-            else:
-                skipped += 1
-                continue
+        if not os.path.isfile(full_path):
+            skipped += 1
+            continue
 
         try:
             img = Image.open(full_path).convert("RGB")

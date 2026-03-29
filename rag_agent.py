@@ -15,7 +15,6 @@ import open_clip
 import torch
 
 from config import (
-    IMAGE_BASE_DIR,
     CHROMA_PERSIST_DIR,
     TEXT_TOP_K,
     IMAGE_TOP_K,
@@ -26,6 +25,9 @@ from config import (
     CLIP_PRETRAINED,
     REACT_MODE,
     REACT_LOG_DIR,
+    IMAGE_RAG_DEFAULT_KW_TEXT,
+    TARGET_KEYWORD_FALLBACK,
+    resolve_dataset_image_path,
 )
 from vector_store import NumpyVectorStore
 from answer_generator import generate_answer, react_agent_decide, generate_direct_reply
@@ -33,12 +35,18 @@ from react_logger import ReactLogger
 
 
 def get_image_full_path(image_path: str) -> str:
+    """题库相对路径走双目录解析；用户本机绝对路径优先原样使用。"""
     if not image_path:
         return ""
-    if os.path.isabs(image_path):
-        return image_path
-    base = os.path.basename(image_path)
-    return os.path.join(IMAGE_BASE_DIR, base)
+    p = image_path.strip()
+    if os.path.isabs(p) and os.path.isfile(p):
+        return p
+    r = resolve_dataset_image_path(p)
+    if r and os.path.isfile(r):
+        return r
+    if os.path.isfile(p):
+        return os.path.abspath(p)
+    return p
 
 
 def _need_full_rag(user_question: str, has_image: bool) -> bool:
@@ -140,19 +148,33 @@ class RAGAgent:
             if t in combined_lower:
                 keywords.add(t)
 
-        # 2. 从 knowledge_concept 提取（按分号/逗号分割）
+        # 2. 从 knowledge_concept 提取（按分号/逗号分割 + 英文词）
         for c in candidates[:10]:
-            kc = c.get("metadata", {}).get("knowledge_concept", "")
+            kc = str(c.get("metadata", {}).get("knowledge_concept", "") or "")
             for part in re.split(r"[;,\n]", kc):
                 part = part.strip()
                 if 3 <= len(part) <= 40 and part.isascii():
                     keywords.add(part)
-                # 取前几个词作为短语
                 words = part.split()
                 if len(words) >= 2:
                     keywords.add(" ".join(words[:2]))
+            for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", kc):
+                if len(w) <= 28:
+                    keywords.add(w.lower())
 
-        # 3. 中文关键概念映射（常见几何），同样考虑用户问题中的中文描述
+        # 3. 理科常见英文词（ScienceQA 等，与数学词表一并启用）
+        science_terms = [
+            "experiment", "hypothesis", "variable", "control", "cell", "energy",
+            "force", "motion", "ecosystem", "photosynthesis", "atom", "molecule",
+            "temperature", "density", "volume", "mass", "gravity", "magnet",
+            "circuit", "planet", "rock", "fossil", "habitat", "species",
+            "map", "compass", "climate", "weather", "tissue", "organ", "dna",
+        ]
+        for t in science_terms:
+            if t in combined_lower:
+                keywords.add(t)
+
+        # 4. 中文关键概念映射（几何，WeMath）
         cn_map = {
             "正方形": "square", "圆": "circle", "梯形": "trapezoid",
             "圆柱": "cylinder", "圆锥": "cone", "扇形": "sector",
@@ -163,7 +185,7 @@ class RAGAgent:
 
         # 限制数量，优先英文术语
         result = list(keywords)[:max_keywords]
-        return result if result else ["geometry", "diagram", "figure"]
+        return result if result else list(TARGET_KEYWORD_FALLBACK)
 
     # ---------- 第二阶段：图像 RAG 精筛选 ----------
     def image_rag_refine(
@@ -207,7 +229,11 @@ class RAGAgent:
 
         # 靶向词文本向量（CLIP 文本编码）
         with torch.no_grad():
-            kw_text = " ".join(targeted_keywords) if targeted_keywords else "geometry diagram"
+            kw_text = (
+                " ".join(targeted_keywords)
+                if targeted_keywords
+                else IMAGE_RAG_DEFAULT_KW_TEXT
+            )
             kw_tokens = open_clip.tokenize([kw_text]).to(self.device)
             kw_emb = self._clip_model.encode_text(kw_tokens)
             kw_emb = kw_emb / kw_emb.norm(dim=-1, keepdim=True)

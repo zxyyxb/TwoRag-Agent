@@ -3,9 +3,42 @@ import os
 
 # 路径配置
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_PATH = os.path.join(BASE_DIR, "we_math_cleaned.csv")
-IMAGE_BASE_DIR = os.path.join(BASE_DIR, "extracted_images")  # 图像文件夹，与CSV中image_path拼接
+
+# 合并题库：WeMath + ScienceQA（由 merge_rag_corpus.py 生成）
+CSV_PATH = os.path.join(BASE_DIR, "merged_rag_corpus.csv")
 CHROMA_PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
+
+# 图像 RAG 默认 CLIP 文本与规则靶向词兜底（合并数学 + 理科）
+IMAGE_RAG_DEFAULT_KW_TEXT = "science math diagram figure experiment geometry"
+TARGET_KEYWORD_FALLBACK = ["diagram", "figure", "science"]
+
+
+def resolve_dataset_image_path(image_path: str) -> str:
+    """
+    解析 CSV / 元数据中的图片路径。
+    - 支持相对项目根：extracted_images/xxx、scienceqa_images_fixed/xxx
+    - 绝对路径原样规范化
+    - 仅文件名时依次在两大目录下查找
+    """
+    if not image_path or not str(image_path).strip():
+        return ""
+    p = str(image_path).strip().replace("\\", "/")
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    parts = p.split("/")
+    if len(parts) > 1:
+        full = os.path.normpath(os.path.join(BASE_DIR, *parts))
+        if os.path.isfile(full):
+            return full
+    bn = os.path.basename(p)
+    for sub in ("extracted_images", "scienceqa_images_fixed"):
+        full = os.path.normpath(os.path.join(BASE_DIR, sub, bn))
+        if os.path.isfile(full):
+            return full
+    if len(parts) > 1:
+        return os.path.normpath(os.path.join(BASE_DIR, *parts))
+    return os.path.normpath(os.path.join(BASE_DIR, "extracted_images", bn))
+
 
 # ChromaDB 集合名
 TEXT_COLLECTION_NAME = "math_text_vectors"

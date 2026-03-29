@@ -1,0 +1,57 @@
+{
+  "config": {
+    "persist_dir": "E:\\毕业论文\\chroma_db",
+    "max_queries": 500,
+    "seed": 42,
+    "k": [
+      5,
+      10
+    ],
+    "text_top_k": 20,
+    "image_top_k": 20,
+    "query_mode": "question",
+    "no_query_image": false,
+    "min_relevant_peers": 1,
+    "output_json": "eval_report.json"
+  },
+  "n_queries": 500,
+  "dual_rag": {
+    "name": "dual_rag_image_refine",
+    "HR@5": 0.576,
+    "Recall@5": 0.0874,
+    "Precision@5": 0.204,
+    "NDCG@5": 0.2004,
+    "HR@10": 0.708,
+    "Recall@10": 0.1576,
+    "Precision@10": 0.2006,
+    "NDCG@10": 0.212,
+    "MRR": 0.3104
+  },
+  "text_baseline": {
+    "name": "text_only_baseline",
+    "HR@5": 0.612,
+    "Recall@5": 0.1047,
+    "Precision@5": 0.2408,
+    "NDCG@5": 0.2636,
+    "HR@10": 0.7,
+    "Recall@10": 0.1633,
+    "Precision@10": 0.2132,
+    "NDCG@10": 0.25,
+    "MRR": 0.4184
+  },
+  "decomposition": {
+    "avg_text_cosine_top10_when_relevant": 0.8806683525725353,
+    "avg_text_cosine_top10_when_irrelevant": 0.7492399003570128,
+    "avg_image_cosine_top10_when_relevant": 0.8700766744665943,
+    "avg_image_cosine_top10_when_irrelevant": 0.8756000782687693,
+    "n_pairs_text": {
+      "relevant": 1003,
+      "irrelevant": 3997
+    },
+    "n_pairs_image": {
+      "relevant": 1003,
+      "irrelevant": 3997
+    },
+    "note": "按同一 knowledge_concept 为相关；图像相似度仅在查询与候选均有图时计入。"
+  }
+}
