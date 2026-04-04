@@ -107,3 +107,52 @@ def mrr(ranked_ids: Sequence[str], relevant: set[str]) -> float:
 def aggregate_mean(values: Iterable[float]) -> float:
     vals = list(values)
     return sum(vals) / len(vals) if vals else 0.0
+
+
+def mean_score_at_k(
+    ranked_ids: Sequence[str],
+    id_to_score: Mapping[str, float],
+    k: int,
+    skip_missing: bool = False,
+) -> float:
+    """
+    Top-K 平均得分（如图像相似度、多模态打分）：用于 MIS@K 等。
+    skip_missing=False 时，缺失 id 记为 0；True 时跳过不参与分母。
+    """
+    top = list(ranked_ids)[:k]
+    if not top:
+        return 0.0
+    vals: list[float] = []
+    for rid in top:
+        if rid not in id_to_score:
+            if skip_missing:
+                continue
+            vals.append(0.0)
+        else:
+            vals.append(float(id_to_score[rid]))
+    if not vals:
+        return 0.0
+    return sum(vals) / len(vals)
+
+
+def ndcg_at_k_oracle_pool(
+    ranked_ids: Sequence[str],
+    pool_grades: Mapping[str, float],
+    k: int,
+) -> float:
+    """
+    给定**固定候选池**上每个 item 的相关性等级（如多模态加权分），
+    对排序结果算 NDCG@K；理想排序 DCG 由池中分数最高的 K 个构成（客观上界）。
+    """
+    if not pool_grades or k <= 0:
+        return 0.0
+    ideal_vals = sorted(pool_grades.values(), reverse=True)[:k]
+    if not ideal_vals or max(ideal_vals) <= 0:
+        return 0.0
+    top = [rid for rid in ranked_ids if rid in pool_grades][:k]
+    rels = [float(pool_grades.get(rid, 0.0)) for rid in top]
+    dcg = dcg_at_k(rels, k)
+    idcg = dcg_at_k(ideal_vals, k)
+    if idcg <= 0:
+        return 0.0
+    return dcg / idcg

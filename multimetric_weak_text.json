@@ -1,0 +1,83 @@
+{
+  "config": {
+    "persist_dir": "E:\\毕业论文\\chroma_db",
+    "max_queries": 500,
+    "seed": 42,
+    "k": [
+      5,
+      10
+    ],
+    "text_top_k": 30,
+    "image_top_k": 20,
+    "query_mode": "question",
+    "truncate_query": 40,
+    "only_with_image": true,
+    "mm_quantile": 0.35,
+    "w_kc": 0.45,
+    "w_txt": 0.3,
+    "w_img": 0.25,
+    "output_json": "multimetric_weak_text.json"
+  },
+  "weights_mm_grade": {
+    "W_KC": 0.45,
+    "W_TXT": 0.3,
+    "W_IMG": 0.25
+  },
+  "n_queries_used": 500,
+  "summary": {
+    "text_pool_order": {
+      "name": "text_pool_order",
+      "HR@5": 0.674,
+      "Recall@5": 0.0238,
+      "Precision@5": 0.5656,
+      "NDCG@5": 0.571,
+      "HR_MM@5": 0.65,
+      "NDCG_MM@5": 0.8798,
+      "MIS@5": 0.8114,
+      "HR@10": 0.702,
+      "Recall@10": 0.0434,
+      "Precision@10": 0.5636,
+      "NDCG@10": 0.5694,
+      "HR_MM@10": 0.684,
+      "NDCG_MM@10": 0.9046,
+      "MIS@10": 0.8088,
+      "MRR": 0.6212
+    },
+    "text_sim_sort": {
+      "name": "text_sim_sort",
+      "HR@5": 0.714,
+      "Recall@5": 0.0392,
+      "Precision@5": 0.6376,
+      "NDCG@5": 0.6537,
+      "HR_MM@5": 0.712,
+      "NDCG_MM@5": 0.9677,
+      "MIS@5": 0.8296,
+      "HR@10": 0.718,
+      "Recall@10": 0.0599,
+      "Precision@10": 0.6078,
+      "NDCG@10": 0.6311,
+      "HR_MM@10": 0.718,
+      "NDCG_MM@10": 0.9745,
+      "MIS@10": 0.8197,
+      "MRR": 0.6975
+    },
+    "dual_rag": {
+      "name": "dual_rag",
+      "HR@5": 0.674,
+      "Recall@5": 0.0259,
+      "Precision@5": 0.6024,
+      "NDCG@5": 0.6086,
+      "HR_MM@5": 0.674,
+      "NDCG_MM@5": 0.9404,
+      "MIS@5": 0.8794,
+      "HR@10": 0.7,
+      "Recall@10": 0.0501,
+      "Precision@10": 0.5858,
+      "NDCG@10": 0.5971,
+      "HR_MM@10": 0.7,
+      "NDCG_MM@10": 0.9525,
+      "MIS@10": 0.8563,
+      "MRR": 0.6465
+    }
+  }
+}
